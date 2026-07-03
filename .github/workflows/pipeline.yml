@@ -1,0 +1,68 @@
+name: Document Ingestion Pipeline
+
+# Runs the full pre-conversion-scan -> doc-to-markdown -> doc-security-scan
+# pipeline against anything added under raw_docs/, and fails the build if
+# either scan stage returns a blocking (exit 2) result.
+
+on:
+  push:
+    paths:
+      - "raw_docs/**"
+  pull_request:
+    paths:
+      - "raw_docs/**"
+  workflow_dispatch:
+
+jobs:
+  scan-and-convert:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Stage 1 - Pre-conversion binary scan
+        id: prescan
+        run: |
+          python3 pre-conversion-scan/scripts/scan_binary.py --batch raw_docs
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
+
+      - name: Halt if stage 1 blocked
+        if: steps.prescan.outputs.exit_code == '2'
+        run: |
+          echo "::error::Pre-conversion scan found blocking issues (exit code 2). See pre-conversion-scan-report.json"
+          exit 1
+
+      - name: Stage 2 - Convert to markdown
+        run: |
+          python3 doc-to-markdown/scripts/convert_to_markdown.py --batch raw_docs converted
+
+      - name: Stage 3 - Content security scan
+        id: contentscan
+        run: |
+          python3 doc-security-scan/scripts/scan_markdown.py --batch converted
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
+
+      - name: Halt if stage 3 blocked
+        if: steps.contentscan.outputs.exit_code == '2'
+        run: |
+          echo "::error::Content scan found blocking issues (exit code 2). See security-scan-report.json"
+          exit 1
+
+      - name: Upload converted markdown + reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-output
+          path: |
+            converted/
+            pre-conversion-scan-report.json
+            security-scan-report.json
+          if-no-files-found: ignore

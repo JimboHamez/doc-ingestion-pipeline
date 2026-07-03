@@ -1,0 +1,10 @@
+# pre-conversion-scan
+oletools>=0.60.2
+pikepdf>=8.0.0
+
+# doc-to-markdown
+markitdown[all]>=0.0.1a2
+charset-normalizer>=3.0.0
+
+# doc-security-scan
+rapidfuzz>=3.0.0

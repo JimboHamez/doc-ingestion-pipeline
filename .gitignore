@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.DS_Store
+*.meta.json
+*-report.json
+*.redacted.md
+
+# Working directories if you test locally against real documents
+raw_docs/
+converted/
