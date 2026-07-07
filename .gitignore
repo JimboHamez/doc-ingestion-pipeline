@@ -5,6 +5,11 @@ __pycache__/
 *-report.json
 *.redacted.md
 
-# Working directories if you test locally against real documents
-raw_docs/
+# Working directories if you test locally against real documents.
+# Ignore everything in raw_docs/ except the committed CI sample.
+raw_docs/*
+!raw_docs/example.md
 converted/
+
+# Local scanner virtualenv (scan.sh)
+.venv/

@@ -5,6 +5,12 @@ pikepdf>=8.0.0
 # doc-to-markdown
 markitdown[all]>=0.0.1a2
 charset-normalizer>=3.0.0
+# OCR fallback for scanned/image-only PDFs (optional at runtime; only loaded
+# when a PDF has no usable text layer). Also requires the system 'tesseract-ocr'
+# binary — e.g. apt-get install tesseract-ocr  /  brew install tesseract
+PyMuPDF>=1.24.0
+pytesseract>=0.3.10
+Pillow>=10.0.0
 
 # doc-security-scan
 rapidfuzz>=3.0.0

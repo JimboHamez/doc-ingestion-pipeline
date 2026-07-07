@@ -56,6 +56,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 try:
     from rapidfuzz.distance import DamerauLevenshtein
@@ -276,7 +277,7 @@ def find_encoded_payload_hits(text: str) -> list[dict]:
 
 
 def scan_text(text: str) -> dict:
-    findings = {
+    findings: dict[str, Any] = {
         "secrets": [], "pii": [],
         "prompt_injection": [], "prompt_injection_review": [],
         "suspicious_urls": [],
