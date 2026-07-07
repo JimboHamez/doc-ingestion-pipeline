@@ -1,16 +1,16 @@
 name: Document Ingestion Pipeline
 
 # Runs the full pre-conversion-scan -> doc-to-markdown -> doc-security-scan
-# pipeline against anything added under raw_docs/, and fails the build if
-# either scan stage returns a blocking (exit 2) result.
+# pipeline against everything under raw_docs/ on every push to main and every
+# pull request, and fails the build if either scan stage returns a blocking
+# (exit 2) result. A clean raw_docs/example.md keeps the pipeline exercised
+# end-to-end (and the status badge green) even before real corpus files land.
 
 on:
   push:
-    paths:
-      - "raw_docs/**"
+    branches:
+      - main
   pull_request:
-    paths:
-      - "raw_docs/**"
   workflow_dispatch:
 
 jobs:
