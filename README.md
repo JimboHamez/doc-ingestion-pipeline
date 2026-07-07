@@ -19,7 +19,8 @@ raw documents
           ▼
 ┌─────────────────────┐   encoding detection, UTF-8 transcoding, Unicode
 │   doc-to-markdown    │   normalization, invisible/control char stripping,
-└─────────┬────────────┘   structure-aware conversion (PDF/DOCX/PPTX/XLSX/HTML)
+└─────────┬────────────┘   structure-aware conversion (PDF/DOCX/PPTX/XLSX/HTML),
+          │                Tesseract OCR fallback for scanned/image-only PDFs
           │
           ▼
 ┌─────────────────────┐   content threats: secrets/credentials, PII,

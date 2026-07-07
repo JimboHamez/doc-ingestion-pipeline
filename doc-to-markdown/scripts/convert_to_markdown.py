@@ -49,6 +49,22 @@ try:
 except ImportError:
     from_bytes = None  # falls back to utf-8/latin-1 guessing
 
+# OCR dependencies are optional: only needed when a PDF has no usable text
+# layer (scanned/image-only). Imported lazily so the script still runs for
+# every other format — and for digital PDFs — without them installed.
+try:
+    import fitz  # PyMuPDF: per-page text detection + rasterization (bundles its
+                 # own renderer, so no Poppler/pdf2image system dependency)
+except ImportError:
+    fitz = None
+
+try:
+    import pytesseract
+    from PIL import Image
+except ImportError:
+    pytesseract = None
+    Image = None
+
 SUPPORTED_EXTENSIONS = {
     ".pdf", ".docx", ".pptx", ".xlsx", ".xls", ".html", ".htm",
     ".txt", ".md", ".csv", ".json", ".xml",
@@ -65,6 +81,73 @@ LIGATURE_MAP = {
     "\ufb00": "ff", "\ufb01": "fi", "\ufb02": "fl",
     "\ufb03": "ffi", "\ufb04": "ffl",
 }
+
+# OCR defaults. A page with fewer than OCR_MIN_CHARS characters of extractable
+# text is treated as image-only and sent to OCR in --ocr auto mode.
+OCR_MIN_CHARS = 100
+OCR_DPI = 300
+OCR_LANG = "eng"
+
+
+class OCRUnavailable(RuntimeError):
+    """Raised when OCR is required but its optional dependencies are missing."""
+
+
+def _require_ocr_deps():
+    """Fail loudly (and actionably) if OCR is needed but not installed."""
+    missing = []
+    if fitz is None:
+        missing.append("PyMuPDF")
+    if pytesseract is None or Image is None:
+        missing.append("pytesseract/Pillow")
+    if missing:
+        raise OCRUnavailable(
+            "OCR requires " + " and ".join(missing) + ". Install with: "
+            "pip install PyMuPDF pytesseract Pillow --break-system-packages "
+            "(and the system 'tesseract-ocr' binary)."
+        )
+    # pytesseract shells out to the tesseract binary; surface its absence early.
+    try:
+        pytesseract.get_tesseract_version()
+    except Exception as e:  # pytesseract.TesseractNotFoundError and friends
+        raise OCRUnavailable(
+            f"The tesseract binary is not available ({e}). Install it, e.g. "
+            "'apt-get install tesseract-ocr' or 'brew install tesseract'."
+        )
+
+
+def assess_pdf_text_layer(input_path: Path) -> list[int]:
+    """Return the extractable-text character count for each PDF page, using
+    PyMuPDF. Used to decide which pages (if any) need OCR. A page whose count
+    is below OCR_MIN_CHARS is effectively image-only."""
+    if fitz is None:
+        raise OCRUnavailable(
+            "PyMuPDF is required to assess the PDF text layer. Install with: "
+            "pip install PyMuPDF --break-system-packages"
+        )
+    with fitz.open(input_path) as doc:
+        return [len(page.get_text("text").strip()) for page in doc]
+
+
+def ocr_pdf_pages(input_path: Path, page_indices: list[int],
+                  dpi: int = OCR_DPI, lang: str = OCR_LANG) -> dict[int, str]:
+    """Rasterize the given (0-based) PDF pages and OCR each one with Tesseract.
+    Returns {page_index: recognized_text}. Pages are rendered in grayscale at
+    the requested DPI, which is a good speed/accuracy trade-off for documents."""
+    _require_ocr_deps()
+    import io
+
+    results: dict[int, str] = {}
+    zoom = dpi / 72.0  # PDF user space is 72 dpi; scale up to the target dpi
+    matrix = fitz.Matrix(zoom, zoom)
+    with fitz.open(input_path) as doc:
+        for idx in page_indices:
+            page = doc[idx]
+            pix = page.get_pixmap(matrix=matrix, colorspace=fitz.csGRAY)
+            image = Image.open(io.BytesIO(pix.tobytes("png")))
+            text = pytesseract.image_to_string(image, lang=lang)
+            results[idx] = text.strip()
+    return results
 
 
 def detect_and_decode(raw: bytes) -> tuple[str, str]:
@@ -123,7 +206,97 @@ def normalize_whitespace(text: str) -> str:
     return text.strip() + "\n"
 
 
-def convert_file(input_path: Path, normalize_form: str = "NFC") -> dict:
+def _render_ocr_pages(page_texts: dict[int, str]) -> str:
+    """Render {0-based page index: text} as Markdown with 1-based page markers."""
+    blocks = []
+    for idx in sorted(page_texts):
+        blocks.append(f"### Page {idx + 1} (OCR)\n\n{page_texts[idx]}")
+    return "\n\n".join(blocks)
+
+
+def apply_pdf_ocr(input_path: Path, markdown: str, warnings: list,
+                  ocr_mode: str = "auto", ocr_lang: str = OCR_LANG,
+                  ocr_dpi: int = OCR_DPI, ocr_min_chars: int = OCR_MIN_CHARS) -> tuple[str, dict]:
+    """Hybrid OCR fallback for PDFs. Inspects the per-page text layer and, in
+    'auto' mode, OCRs only the pages that are missing/thin; 'force' OCRs every
+    page; 'never' is a no-op. Returns (possibly-augmented markdown, ocr_stats).
+
+    - Fully image-only PDF (all pages thin): output is rebuilt from OCR text.
+    - Mixed PDF (some digital, some scanned): the digital MarkItDown output is
+      kept and the OCR'd pages are appended under a clear 'OCR-recovered pages'
+      section, so nothing extracted digitally is lost or silently reordered."""
+    stats = {
+        "ocr_mode": ocr_mode,
+        "ocr_applied": False,
+        "ocr_engine": None,
+        "ocr_lang": ocr_lang,
+        "ocr_dpi": ocr_dpi,
+        "ocr_min_chars": ocr_min_chars,
+        "ocr_pages": [],
+        "pdf_page_count": None,
+        "pdf_page_char_counts": None,
+    }
+    if ocr_mode == "never":
+        return markdown, stats
+
+    page_char_counts = assess_pdf_text_layer(input_path)
+    stats["pdf_page_count"] = len(page_char_counts)
+    stats["pdf_page_char_counts"] = page_char_counts
+
+    if ocr_mode == "force":
+        thin_pages = list(range(len(page_char_counts)))
+    else:  # auto
+        thin_pages = [i for i, n in enumerate(page_char_counts) if n < ocr_min_chars]
+
+    if not thin_pages:
+        return markdown, stats
+
+    _require_ocr_deps()
+    page_texts = ocr_pdf_pages(input_path, thin_pages, dpi=ocr_dpi, lang=ocr_lang)
+    # Drop pages OCR produced nothing for (e.g. genuinely blank pages), so we
+    # don't emit empty "### Page N" stubs.
+    page_texts = {i: t for i, t in page_texts.items() if t}
+
+    stats["ocr_applied"] = bool(page_texts)
+    stats["ocr_engine"] = f"tesseract {pytesseract.get_tesseract_version()}"
+    stats["ocr_pages"] = [i + 1 for i in sorted(page_texts)]
+
+    if not page_texts:
+        warnings.append(
+            f"OCR ran on {len(thin_pages)} page(s) with no extractable text but "
+            "recognized nothing — pages may be blank or unreadable"
+        )
+        return markdown, stats
+
+    ocr_md = _render_ocr_pages(page_texts)
+    digital_pages = [i for i in range(len(page_char_counts)) if i not in thin_pages]
+    if digital_pages and markdown.strip():
+        # Mixed document: preserve digital extraction, append recovered pages.
+        warnings.append(
+            f"OCR applied to {len(page_texts)} image-only page(s): "
+            f"{stats['ocr_pages']} — appended under 'OCR-recovered pages'"
+        )
+        markdown = markdown.rstrip() + "\n\n---\n\n## OCR-recovered pages\n\n" + ocr_md
+    elif ocr_mode == "force":
+        # OCR was forced on every page; OCR text replaces any digital extraction.
+        warnings.append(
+            f"OCR forced on all {len(page_texts)} page(s) "
+            f"(lang={ocr_lang}, {ocr_dpi} dpi); digital text layer ignored"
+        )
+        markdown = ocr_md
+    else:
+        # Fully scanned document: OCR text is the content.
+        warnings.append(
+            f"PDF had no usable text layer; content recovered via OCR "
+            f"({len(page_texts)} page(s), lang={ocr_lang}, {ocr_dpi} dpi)"
+        )
+        markdown = ocr_md
+    return markdown, stats
+
+
+def convert_file(input_path: Path, normalize_form: str = "NFC",
+                 ocr_mode: str = "auto", ocr_lang: str = OCR_LANG,
+                 ocr_dpi: int = OCR_DPI, ocr_min_chars: int = OCR_MIN_CHARS) -> dict:
     """Run the full pipeline on one file. Returns a result dict with
     'markdown', 'warnings', and 'stats' keys. Raises on unrecoverable errors."""
     warnings = []
@@ -135,6 +308,7 @@ def convert_file(input_path: Path, normalize_form: str = "NFC") -> dict:
     source_bytes = input_path.read_bytes()
     source_hash = hashlib.sha256(source_bytes).hexdigest()
 
+    ocr_stats = {"ocr_applied": False, "ocr_mode": ocr_mode}
     if ext in {".txt", ".md", ".csv", ".json", ".xml"}:
         text, encoding = detect_and_decode(source_bytes)
         if encoding not in ("utf-8", "utf-8-bom"):
@@ -145,6 +319,15 @@ def convert_file(input_path: Path, normalize_form: str = "NFC") -> dict:
         md_converter = MarkItDown()
         result = md_converter.convert(str(input_path))
         markdown = result.text_content
+
+    # Hybrid OCR fallback for PDFs with a missing/thin text layer (scanned docs).
+    # Runs before normalization so recovered text is cleaned like everything else.
+    if ext == ".pdf":
+        markdown, ocr_stats = apply_pdf_ocr(
+            input_path, markdown, warnings,
+            ocr_mode=ocr_mode, ocr_lang=ocr_lang,
+            ocr_dpi=ocr_dpi, ocr_min_chars=ocr_min_chars,
+        )
 
     pre_len = len(markdown)
     markdown, removed_count = strip_invisible_and_control(markdown)
@@ -176,6 +359,7 @@ def convert_file(input_path: Path, normalize_form: str = "NFC") -> dict:
             "output_chars": len(markdown),
             "chars_removed_pre_normalize": removed_count,
             "normalize_form": normalize_form,
+            "ocr": ocr_stats,
         },
     }
 
@@ -193,7 +377,20 @@ def main():
     parser.add_argument("--batch", action="store_true", help="Treat input/output as directories")
     parser.add_argument("--normalize-form", default="NFC", choices=["NFC", "NFKC", "NFD", "NFKD"],
                          help="Unicode normalization form (default: NFC)")
+    parser.add_argument("--ocr", default="auto", choices=["auto", "never", "force"],
+                         help="PDF OCR fallback: 'auto' OCRs only pages with a missing/thin "
+                              "text layer (default), 'never' disables OCR, 'force' OCRs every page")
+    parser.add_argument("--ocr-lang", default=OCR_LANG,
+                         help=f"Tesseract language(s), e.g. 'eng' or 'eng+deu' (default: {OCR_LANG})")
+    parser.add_argument("--ocr-dpi", type=int, default=OCR_DPI,
+                         help=f"Rasterization DPI for OCR (default: {OCR_DPI})")
+    parser.add_argument("--ocr-min-chars", type=int, default=OCR_MIN_CHARS,
+                         help=f"In 'auto' mode, OCR a page whose extractable text is below this "
+                              f"many characters (default: {OCR_MIN_CHARS})")
     args = parser.parse_args()
+
+    ocr_kwargs = dict(ocr_mode=args.ocr, ocr_lang=args.ocr_lang,
+                      ocr_dpi=args.ocr_dpi, ocr_min_chars=args.ocr_min_chars)
 
     if args.batch:
         in_dir = Path(args.input)
@@ -204,7 +401,7 @@ def main():
             if f.is_file() and f.suffix.lower() in SUPPORTED_EXTENSIONS:
                 out_path = out_dir / (f.stem + ".md")
                 try:
-                    result = convert_file(f, normalize_form=args.normalize_form)
+                    result = convert_file(f, normalize_form=args.normalize_form, **ocr_kwargs)
                     write_output(result, out_path)
                     print(f"OK   {f} -> {out_path}" + (f"  [{len(result['warnings'])} warning(s)]" if result["warnings"] else ""))
                 except Exception as e:
@@ -218,7 +415,7 @@ def main():
     in_path = Path(args.input)
     out_path = Path(args.output) if args.output else in_path.with_suffix(".md")
     try:
-        result = convert_file(in_path, normalize_form=args.normalize_form)
+        result = convert_file(in_path, normalize_form=args.normalize_form, **ocr_kwargs)
     except Exception as e:
         print(f"ERROR converting {in_path}: {e}", file=sys.stderr)
         sys.exit(1)
@@ -227,6 +424,9 @@ def main():
     print(f"Converted: {in_path} -> {out_path}")
     print(f"  SHA-256:  {result['stats']['source_sha256'][:16]}...")
     print(f"  Chars:    {result['stats']['output_chars']}")
+    ocr = result["stats"].get("ocr", {})
+    if ocr.get("ocr_applied"):
+        print(f"  OCR:      {ocr['ocr_engine']} on page(s) {ocr['ocr_pages']} (lang={ocr['ocr_lang']}, {ocr['ocr_dpi']} dpi)")
     if result["warnings"]:
         for w in result["warnings"]:
             print(f"  Warning:  {w}")
