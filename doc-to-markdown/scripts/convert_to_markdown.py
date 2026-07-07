@@ -37,6 +37,7 @@ import re
 import sys
 import unicodedata
 from pathlib import Path
+from typing import Literal, cast
 
 try:
     from markitdown import MarkItDown
@@ -47,7 +48,7 @@ except ImportError:
 try:
     from charset_normalizer import from_bytes
 except ImportError:
-    from_bytes = None  # falls back to utf-8/latin-1 guessing
+    from_bytes = None  # type: ignore[assignment]  # falls back to utf-8/latin-1 guessing
 
 # OCR dependencies are optional: only needed when a PDF has no usable text
 # layer (scanned/image-only). Imported lazily so the script still runs for
@@ -186,7 +187,7 @@ def strip_invisible_and_control(text: str) -> tuple[str, int]:
 def normalize_unicode(text: str, form: str = "NFC") -> str:
     for lig, repl in LIGATURE_MAP.items():
         text = text.replace(lig, repl)
-    return unicodedata.normalize(form, text)
+    return unicodedata.normalize(cast(Literal["NFC", "NFKC", "NFD", "NFKD"], form), text)
 
 
 def dehyphenate(text: str) -> str:

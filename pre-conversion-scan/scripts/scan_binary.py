@@ -41,6 +41,7 @@ import re
 import sys
 import zipfile
 from pathlib import Path
+from typing import Any
 
 try:
     from oletools.olevba import VBA_Parser
@@ -114,8 +115,17 @@ def check_extension_mismatch(path: Path, detected_format: str) -> list[dict]:
     return findings
 
 
+def _read_zip_member(zf: zipfile.ZipFile, name: str) -> str | None:
+    """Read and UTF-8-decode a zip member, returning None if it can't be read
+    (a corrupt/unreadable member shouldn't abort the scan of the rest)."""
+    try:
+        return zf.read(name).decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+
 def scan_zip_container(path: Path) -> dict:
-    findings = {"macros": [], "embedded_executables": [], "remote_injection": [], "xxe": [], "zip_bomb": []}
+    findings: dict[str, Any] = {"macros": [], "embedded_executables": [], "remote_injection": [], "xxe": [], "zip_bomb": []}
     try:
         with zipfile.ZipFile(path) as zf:
             infolist = zf.infolist()
@@ -141,9 +151,8 @@ def scan_zip_container(path: Path) -> dict:
 
             for n in names:
                 if n.endswith(".rels"):
-                    try:
-                        content = zf.read(n).decode("utf-8", errors="replace")
-                    except Exception:
+                    content = _read_zip_member(zf, n)
+                    if content is None:
                         continue
                     for m in re.finditer(r'TargetMode="External"[^>]*Target="([^"]+)"|Target="([^"]+)"[^>]*TargetMode="External"', content):
                         target = m.group(1) or m.group(2)
@@ -151,9 +160,8 @@ def scan_zip_container(path: Path) -> dict:
 
             for n in names:
                 if n.endswith(".xml"):
-                    try:
-                        content = zf.read(n).decode("utf-8", errors="replace")
-                    except Exception:
+                    content = _read_zip_member(zf, n)
+                    if content is None:
                         continue
                     if "<!DOCTYPE" in content or "<!ENTITY" in content:
                         findings["xxe"].append({"type": "doctype_or_entity_declaration", "detail": n})
@@ -167,7 +175,7 @@ def scan_zip_container(path: Path) -> dict:
 def scan_macros_with_oletools(path: Path) -> dict:
     """Real VBA decompilation + suspicious-keyword scan. Works on both
     legacy OLE (.doc/.xls/.ppt) and OOXML (.docm/.xlsm/.pptm) containers."""
-    findings = {"autoexec": [], "suspicious_keywords": [], "parse_error": None}
+    findings: dict[str, Any] = {"autoexec": [], "suspicious_keywords": [], "parse_error": None}
     if not OLETOOLS_AVAILABLE:
         findings["parse_error"] = "oletools not installed -- macro content analysis skipped"
         return findings
@@ -193,7 +201,7 @@ def scan_macros_with_oletools(path: Path) -> dict:
 
 
 def scan_pdf(path: Path) -> dict:
-    findings = {"launch_actions": [], "js_or_autorun": [], "encrypted": []}
+    findings: dict[str, Any] = {"launch_actions": [], "js_or_autorun": [], "encrypted": []}
     raw = path.read_bytes()
     for kw in PDF_BLOCK_KEYWORDS:
         if kw in raw:
@@ -210,7 +218,7 @@ def scan_file(path: Path) -> dict:
     raw_head = path.read_bytes()[:8]
     detected_format = identify_format(raw_head)
 
-    report = {
+    report: dict[str, Any] = {
         "file": str(path),
         "detected_format": detected_format,
         "extension_findings": check_extension_mismatch(path, detected_format),

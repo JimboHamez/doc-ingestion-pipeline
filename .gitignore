@@ -8,3 +8,6 @@ __pycache__/
 # Working directories if you test locally against real documents
 raw_docs/
 converted/
+
+# Local scanner virtualenv (scan.sh)
+.venv/
