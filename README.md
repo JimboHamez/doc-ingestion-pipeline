@@ -1,5 +1,7 @@
 # doc-ingestion-pipeline
 
+[![Document Ingestion Pipeline](https://github.com/JimboHamez/doc-ingestion-pipeline/actions/workflows/pipeline.yml/badge.svg)](https://github.com/JimboHamez/doc-ingestion-pipeline/actions/workflows/pipeline.yml)
+
 Three Claude Agent Skills that form a governed pipeline for turning arbitrary
 source documents into clean, safe Markdown ready for AI ingestion (RAG,
 embeddings, fine-tuning corpora).
